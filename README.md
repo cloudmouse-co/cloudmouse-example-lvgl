@@ -374,6 +374,93 @@ EventType::SYSTEM_READY         // System fully initialized
 // ... see Events.h for complete list
 ```
 
+### Cross-Core Communication Pattern
+
+CloudMouse uses two different patterns for optimal performance across cores:
+
+#### Core 0 → App Orchestrator (Interface Pattern)
+
+Your main app logic runs on Core 0 and receives events through the `IAppOrchestrator` interface:
+```cpp
+class MyApp : public CloudMouse::IAppOrchestrator {
+    void processSDKEvent(const CloudMouse::Event& event) override {
+        // Handle system events: WiFi, encoder, etc.
+    }
+};
+```
+
+**Why interface?** Flexibility, type-safety, multiple methods, not time-critical.
+
+#### Core 1 → Display Manager (Callback Pattern)
+
+If you need custom display logic on Core 1 (30Hz rendering), use callbacks for maximum performance:
+```cpp
+// In your custom DisplayManager
+class MyDisplayManager {
+public:
+    static void handleDisplayCallback(const CloudMouse::Event& event) {
+        // Handle UI events on Core 1 - must be FAST!
+        switch(event.type) {
+            case EventType::CUSTOM_UI_UPDATE:
+                // Update display immediately
+                break;
+        }
+    }
+};
+
+// Register in setup
+CloudMouse::Core::instance().getDisplay()->registerAppCallback(
+    &MyDisplayManager::handleDisplayCallback
+);
+```
+
+**Why callback?** Ultra-fast, single method, performance-critical UI thread.
+
+#### Communication Flow
+```
+┌─────────────────────────────────────────────────────────┐
+│ Core 1 (UI Thread - 30Hz)                               │
+│                                                         │
+│  DisplayManager ─[callback]→ Your Display Logic         │
+│                      ↓                                  │
+│                 [EventBus]                              │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+                       ↓
+┌──────────────────────┴──────────────────────────────────┐
+│ Core 0 (Main Thread - 20Hz)                             │
+│                                                         │
+│  Core System ─[interface]→ Your App Orchestrator        │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Best Practice**: 
+- Keep Core 1 callbacks **ultra-fast** (< 1ms)
+- Do heavy processing in Core 0 orchestrator
+- Use EventBus to communicate between cores
+```cpp
+// ✅ GOOD - Fast UI update on Core 1
+void handleDisplayCallback(const Event& event) {
+    sprite.fillRect(10, 10, 100, 50, TFT_BLUE);
+    sprite.pushSprite();
+}
+
+// ❌ BAD - Slow operation on Core 1
+void handleDisplayCallback(const Event& event) {
+    HTTPClient http;
+    http.GET("https://api.example.com");  // NEVER do this on Core 1!
+}
+
+// ✅ GOOD - Send to Core 0 for processing
+void handleDisplayCallback(const Event& event) {
+    Event webRequest(EventType::FETCH_DATA);
+    EventBus::instance().sendToMain(webRequest);  // Core 0 handles it
+}
+```
+
+---
+
 ### Benefits
 
 ✅ **Clean separation** - Your app logic stays independent from SDK internals  
